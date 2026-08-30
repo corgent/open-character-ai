@@ -1,7 +1,8 @@
 "use client";
 
 import { useSession } from "next-auth/react";
-import { useState } from "react";
+import { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { FaCheck, FaInfoCircle } from "react-icons/fa";
@@ -9,15 +10,26 @@ import axios from "axios";
 import toast, { Toaster } from "react-hot-toast";
 
 const PLANS = [
-  { id: "basic", name: "Basic Pack", price: "$5", credits: 100, description: "Perfect for testing custom prompts and exploring styles." },
-  { id: "standard", name: "Standard Pack", price: "$10", credits: 250, description: "Ideal for regular creators wanting high resolution outputs." },
-  { id: "pro", name: "Professional Pack", price: "$20", credits: 600, description: "Designed for power users demanding batch exports and high speed.", popular: true },
-  { id: "business", name: "Business Pack", price: "$50", credits: 2000, description: "Maximum value pack for agency workflows and large volume generations." }
+  { id: "basic", name: "Basic Pack", price: "$5", credits: 100, description: "Perfect for testing personas and exploring standard models." },
+  { id: "standard", name: "Standard Pack", price: "$10", credits: 250, description: "Ideal for regular chatters wanting deeper conversations." },
+  { id: "pro", name: "Professional Pack", price: "$20", credits: 600, description: "Designed for power users running premium LLM engines daily.", popular: true },
+  { id: "business", name: "Business Pack", price: "$50", credits: 2000, description: "Maximum value pack for heavy workloads and community builders." }
 ];
 
-export default function Pricing() {
-  const { data: session, status } = useSession();
+function PricingContent() {
+  const { data: session, status, update: updateSession } = useSession();
+  const searchParams = useSearchParams();
   const [loadingPlan, setLoadingPlan] = useState(null);
+
+  // Surface the Stripe checkout outcome after redirect
+  useEffect(() => {
+    if (searchParams.get("success") === "true") {
+      toast.success("Payment successful! Your credits have been added.");
+      updateSession();
+    } else if (searchParams.get("canceled") === "true") {
+      toast("Checkout canceled — you were not charged.", { icon: "ℹ️" });
+    }
+  }, [searchParams]);
 
   const handleCheckout = async (planId) => {
     if (status !== "authenticated") {
@@ -29,7 +41,7 @@ export default function Pricing() {
     try {
       const { data } = await axios.post("/api/checkout", { planId });
       if (data.url) {
-        window.location.href = data.url;
+        window.location.assign(data.url);
       } else {
         throw new Error("No redirection URL returned");
       }
@@ -80,7 +92,7 @@ export default function Pricing() {
                 </div>
                 
                 <div className="text-xs bg-bg-page/50 border border-divider/30 p-3 rounded text-center font-extrabold text-primary">
-                  {plan.credits} Art Credits
+                  {plan.credits} Chat Credits
                 </div>
 
                 <p className="text-xs text-secondary-text leading-relaxed font-medium min-h-[3rem]">{plan.description}</p>
@@ -88,11 +100,11 @@ export default function Pricing() {
                 <ul className="space-y-2 border-t border-divider/30 pt-4 text-xs font-semibold text-secondary-text">
                   <li className="flex items-center gap-2">
                     <FaCheck className="text-primary text-[10px]" />
-                    <span>Dynamic aspect ratios</span>
+                    <span>Premium LLM engines (GPT-4o, Claude, DeepSeek)</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <FaCheck className="text-primary text-[10px]" />
-                    <span>HD image downloads</span>
+                    <span>Credits never expire</span>
                   </li>
                   <li className="flex items-center gap-2">
                     <FaCheck className="text-primary text-[10px]" />
@@ -117,5 +129,19 @@ export default function Pricing() {
 
       <Footer />
     </div>
+  );
+}
+
+export default function Pricing() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-dvh flex items-center justify-center bg-bg-page text-primary-text">
+          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      }
+    >
+      <PricingContent />
+    </Suspense>
   );
 }

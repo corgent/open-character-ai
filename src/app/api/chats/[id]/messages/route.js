@@ -2,9 +2,14 @@ import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import config, { getModelCost } from "@/lib/config";
 
 // Utility sleep helper
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// MuAPI polling bounds — prevents hanging a serverless function indefinitely
+const POLL_TICK_MS = 1500;
+const POLL_TIMEOUT_MS = 90000; // ~90s, within typical serverless limits
 
 export async function GET(req, { params }) {
   try {
@@ -14,6 +19,16 @@ export async function GET(req, { params }) {
     }
 
     const { id } = await params;
+
+    // Verify the chat exists and belongs to the current user
+    const ownedChat = await prisma.chat.findUnique({
+      where: { id },
+      select: { userId: true },
+    });
+
+    if (!ownedChat || ownedChat.userId !== session.user.id) {
+      return NextResponse.json({ error: "Chat thread not found" }, { status: 404 });
+    }
 
     let messages = await prisma.message.findMany({
       where: { chatId: id },
@@ -50,7 +65,7 @@ export async function GET(req, { params }) {
 }
 
 export async function POST(req, { params }) {
-  let cost = 2;
+  let cost = 0;
   let creditsDeducted = false;
   let userId = null;
 
@@ -63,18 +78,37 @@ export async function POST(req, { params }) {
 
     const { id } = await params;
     const body = await req.json();
-    const { content, imageUrl, model = "google/gemini-2.5-flash", temperature = 1.0, maxTokens = 2048, reasoning = false } = body;
+    const { content, imageUrl } = body;
 
-    if (!content) {
+    if (!content || !content.trim()) {
       return NextResponse.json({ error: "Message content is required" }, { status: 400 });
     }
+
+    // Fetch the chat (with its persisted tuning settings) and verify ownership
+    const chat = await prisma.chat.findUnique({
+      where: { id },
+      include: { character: true },
+    });
+
+    if (!chat || chat.userId !== userId) {
+      return NextResponse.json({ error: "Chat thread not found" }, { status: 404 });
+    }
+
+    // Persisted per-chat settings act as the source of truth; the request may
+    // only narrow them further, and unknown values fall back to defaults.
+    const model = body.model || chat.model || "google/gemini-2.5-flash";
+    const temperature = body.temperature ?? chat.temperature ?? 1.0;
+    const maxTokens = body.maxTokens ?? chat.maxTokens ?? 2048;
+    const reasoning = body.reasoning ?? chat.reasoning ?? false;
+    const systemPromptOverride = body.systemPromptOverride ?? chat.systemPromptOverride ?? null;
 
     // Extract custom API key if present
     const headerApiKey = req.headers.get("x-custom-api-key");
     const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
     const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
 
-    cost = isUsingCustomKey ? 0 : 2;
+    // Cost is derived server-side from the selected model tier
+    cost = isUsingCustomKey ? 0 : getModelCost(model);
 
     // 1. Fetch user's credit balance if using site credits
     const user = await prisma.user.findUnique({
@@ -86,44 +120,48 @@ export async function POST(req, { params }) {
     }
 
     if (!isUsingCustomKey && user.credits < cost) {
-      return NextResponse.json({ error: `Insufficient credits. This requires ${cost} credits but you only have ${user.credits} remaining.` }, { status: 402 });
-    }
-
-    // 2. Fetch the corresponding Character's configured system prompt
-    const chat = await prisma.chat.findUnique({
-      where: { id },
-      include: { character: true },
-    });
-
-    if (!chat) {
-      return NextResponse.json({ error: "Chat thread not found" }, { status: 404 });
+      return NextResponse.json(
+        {
+          error: `Insufficient credits. This model requires ${cost} credit${cost === 1 ? "" : "s"} per message but you only have ${user.credits} remaining.`,
+          required: cost,
+          remaining: user.credits,
+        },
+        { status: 402 },
+      );
     }
 
     // Fetch the last 10 messages for conversational context
     const previousMessages = await prisma.message.findMany({
       where: { chatId: id },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       take: 10,
     });
-    
+
     // Reverse to chronological order
     previousMessages.reverse();
 
     // Format the conversational history
     let historyBlock = "";
     if (previousMessages.length > 0) {
-      const formattedHistory = previousMessages.map(m => `${m.role === 'user' ? 'User' : chat.character.name}: ${m.content}`).join("\n\n");
+      const formattedHistory = previousMessages
+        .map((m) => `${m.role === "user" ? "User" : chat.character.name}: ${m.content}`)
+        .join("\n\n");
       historyBlock = `\n\n### RECENT CONVERSATION HISTORY ###\n${formattedHistory}\n\n`;
     }
 
-    const enhancedSystemPrompt = `${chat.character.systemPrompt}${historyBlock}
+    const baseSystemPrompt =
+      systemPromptOverride && systemPromptOverride.trim().length > 0
+        ? systemPromptOverride
+        : chat.character.systemPrompt;
+
+    const enhancedSystemPrompt = `${baseSystemPrompt}${historyBlock}
 IMPORTANT:
 - Reply to the USER's latest message naturally based on the above recent conversation history.
 - Do not repeat the history.
 - You are roleplaying as ${chat.character.name}. Write your response directly in first-person as ${chat.character.name}.
 - Do NOT start your response with "User: ...", "${chat.character.name}: ...", or similar labels. Just output the dialogue itself.`;
 
-    // 3. Deduct credits first if not using custom key
+    // 2. Deduct credits first if not using custom key
     if (!isUsingCustomKey && cost > 0) {
       await prisma.user.update({
         where: { id: userId },
@@ -132,7 +170,7 @@ IMPORTANT:
       creditsDeducted = true;
     }
 
-    // 4. Save the User's submitted message
+    // 3. Save the User's submitted message
     const userMessage = await prisma.message.create({
       data: {
         chatId: id,
@@ -142,16 +180,16 @@ IMPORTANT:
       },
     });
 
-    // 5. Connect to MuAPI
-    const apiKey = isUsingCustomKey ? customApiKey.trim() : process.env.MU_API_KEY;
+    // 4. Connect to MuAPI
+    const apiKey = isUsingCustomKey ? customApiKey.trim() : config.ai.apiKey;
     if (!apiKey) {
       throw new Error("API key is missing.");
     }
 
     // Select endpoint depending on whether an image was attached or not
     const isVision = !!imageUrl;
-    const apiUrl = isVision 
-      ? "https://api.muapi.ai/api/v1/openrouter-vision" 
+    const apiUrl = isVision
+      ? "https://api.muapi.ai/api/v1/openrouter-vision"
       : "https://api.muapi.ai/api/v1/any-llm-models";
 
     const payload = {
@@ -189,13 +227,17 @@ IMPORTANT:
       throw new Error("Did not receive a request_id from upstream server.");
     }
 
-    // 6. Synchronous server-side polling loop to retrieve results
+    // 5. Bounded server-side polling loop to retrieve results
     let completedText = "";
     let status = "processing";
-    const tickDelay = 1500;
+    const pollDeadline = Date.now() + POLL_TIMEOUT_MS;
 
     while (status === "processing") {
-      await delay(tickDelay);
+      if (Date.now() > pollDeadline) {
+        throw new Error("Generation timed out waiting for the upstream system. Please try again.");
+      }
+
+      await delay(POLL_TICK_MS);
 
       const checkRes = await fetch(`https://api.muapi.ai/api/v1/predictions/${requestId}/result`, {
         method: "GET",
@@ -210,12 +252,13 @@ IMPORTANT:
         status = checkData.status || checkData.state || "processing";
 
         if (status === "completed" || status === "succeeded") {
-          completedText = checkData.outputs?.[0] || 
-                          (typeof checkData.output === "string" ? checkData.output : "") ||
-                          checkData.output?.text ||
-                          checkData.output?.choices?.[0]?.message?.content ||
-                          checkData.response ||
-                          "";
+          completedText =
+            checkData.outputs?.[0] ||
+            (typeof checkData.output === "string" ? checkData.output : "") ||
+            checkData.output?.text ||
+            checkData.output?.choices?.[0]?.message?.content ||
+            checkData.response ||
+            "";
           status = "completed"; // normalize
           break;
         } else if (status === "failed") {
@@ -226,7 +269,7 @@ IMPORTANT:
       }
     }
 
-    // 7. Save and commit assistant response
+    // 6. Save and commit assistant response
     const assistantMessage = await prisma.message.create({
       data: {
         chatId: id,
@@ -235,17 +278,25 @@ IMPORTANT:
       },
     });
 
+    // 7. Auto-title brand new chats from the first user message
+    if (!chat.title) {
+      const autoTitle = content.trim().slice(0, 60);
+      prisma.chat
+        .update({ where: { id }, data: { title: autoTitle } })
+        .catch((err) => console.error("[CHAT_AUTOTITLE_ERROR]", err));
+    }
+
     return NextResponse.json({
       userMessage,
       assistantMessage,
       remainingCredits: isUsingCustomKey ? "∞" : user.credits - cost,
+      cost,
     });
-
   } catch (error) {
     console.error("[MESSAGES_POST_ERROR]", error);
 
     // Auto-refund credits to the user if deduction occurred but completion failed
-    if (creditsDeducted && userId) {
+    if (creditsDeducted && userId && cost > 0) {
       try {
         await prisma.user.update({
           where: { id: userId },

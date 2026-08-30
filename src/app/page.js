@@ -4,9 +4,9 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useSession, signIn, signOut } from "next-auth/react";
 import Link from "next/link";
+import toast, { Toaster } from "react-hot-toast";
 import {
   Search,
-  Settings,
   LogIn,
   LogOut,
   X,
@@ -14,11 +14,34 @@ import {
   MessageSquare,
   Loader2,
   Menu,
+  Pencil,
+  Trash2,
 } from "lucide-react";
+
+const CATEGORIES = [
+  { id: "all", label: "All" },
+  { id: "official", label: "Featured" },
+  { id: "community", label: "Community" },
+  { id: "mine", label: "My Characters" },
+];
+
+const INITIAL_VISIBLE = 24;
+const VISIBLE_STEP = 24;
+
+const EMPTY_CHAR = {
+  name: "",
+  avatar: "🤖",
+  profile_url: "",
+  description: "",
+  personality: "",
+  systemPrompt: "",
+  greeting: "",
+  is_public: true,
+};
 
 export default function HomeDashboard() {
   const router = useRouter();
-  const { data: session, status: authStatus } = useSession();
+  const { data: session, status: authStatus, update: updateSession } = useSession();
 
   // Core data states
   const [characters, setCharacters] = useState([]);
@@ -28,30 +51,14 @@ export default function HomeDashboard() {
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [userCredits, setUserCredits] = useState(50);
   const [showSidebar, setShowSidebar] = useState(false);
+  const [activeCategory, setActiveCategory] = useState("all");
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
 
-  // Create Character Modal states
+  // Create/Edit Character Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [newChar, setNewChar] = useState({
-    name: "",
-    avatar: "🤖",
-    profile_url: "",
-    description: "",
-    personality: "",
-    systemPrompt: "",
-    greeting: "",
-    is_public: true,
-  });
+  const [editingCharacter, setEditingCharacter] = useState(null);
+  const [newChar, setNewChar] = useState(EMPTY_CHAR);
   const [isCreating, setIsCreating] = useState(false);
-
-  useEffect(() => {
-    fetchInitialData();
-  }, [authStatus]);
-
-  useEffect(() => {
-    if (session?.user) {
-      setUserCredits(session.user.credits);
-    }
-  }, [session]);
 
   const fetchInitialData = async () => {
     try {
@@ -64,7 +71,7 @@ export default function HomeDashboard() {
       }
 
       if (authStatus === "authenticated") {
-        // Sync active chats from SQLite/DB
+        // Sync active chats from the database
         const chatRes = await fetch("/api/chats");
         const chatData = await chatRes.json();
         if (chatData.chats) {
@@ -73,10 +80,37 @@ export default function HomeDashboard() {
       }
     } catch (err) {
       console.error("Failed to load initial workspace data", err);
+      toast.error("Failed to load workspace data.");
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    const id = setTimeout(() => fetchInitialData(), 0);
+    return () => clearTimeout(id);
+  }, [authStatus]);
+
+  useEffect(() => {
+    if (session?.user?.credits === undefined) return;
+    const credits = session.user.credits;
+    const id = setTimeout(() => setUserCredits(credits), 0);
+    return () => clearTimeout(id);
+  }, [session]);
+
+  // Surface payment redirects from Stripe checkout
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("payment_success") === "true" || params.get("success") === "true") {
+      toast.success("Payment successful! Your credits will appear shortly.");
+      updateSession();
+      window.history.replaceState({}, "", window.location.pathname);
+    } else if (params.get("payment_canceled") === "true" || params.get("canceled") === "true") {
+      toast("Checkout canceled — no credits were charged.", { icon: "ℹ️" });
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   // Triggers creation of a chat session
   const handleStartChat = async (characterId, characterName) => {
@@ -97,10 +131,32 @@ export default function HomeDashboard() {
       }
     } catch (err) {
       console.error("Failed to instantiate chat thread", err);
+      toast.error("Failed to start chat session.");
     }
   };
 
-  const handleCreateCharacter = async (e) => {
+  const openCreateModal = () => {
+    setEditingCharacter(null);
+    setNewChar(EMPTY_CHAR);
+    setShowCreateModal(true);
+  };
+
+  const openEditModal = (char) => {
+    setEditingCharacter(char);
+    setNewChar({
+      name: char.name || "",
+      avatar: char.avatar || "🤖",
+      profile_url: char.profileUrl || "",
+      description: char.description || "",
+      personality: char.personality || "",
+      systemPrompt: char.systemPrompt || "",
+      greeting: char.greeting || "",
+      is_public: char.isPublic !== false,
+    });
+    setShowCreateModal(true);
+  };
+
+  const handleSaveCharacter = async (e) => {
     e.preventDefault();
     if (authStatus !== "authenticated") {
       signIn("google");
@@ -108,40 +164,64 @@ export default function HomeDashboard() {
     }
     try {
       setIsCreating(true);
-      const res = await fetch("/api/characters", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(newChar),
-      });
+      const isEdit = Boolean(editingCharacter);
+      const res = await fetch(
+        isEdit ? `/api/characters/${editingCharacter.id}` : "/api/characters",
+        {
+          method: isEdit ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(newChar),
+        },
+      );
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to save character");
+      }
       if (data.character) {
-        setCharacters((prev) => [...prev, data.character]);
-        setShowCreateModal(false);
-        setNewChar({
-          name: "",
-          avatar: "🤖",
-          profile_url: "",
-          description: "",
-          personality: "",
-          systemPrompt: "",
-          greeting: "",
-          is_public: true,
-        });
-        await handleStartChat(data.character.id, data.character.name);
+        if (isEdit) {
+          setCharacters((prev) =>
+            prev.map((c) => (c.id === data.character.id ? data.character : c)),
+          );
+          toast.success("Character updated!");
+          setShowCreateModal(false);
+          setEditingCharacter(null);
+          setNewChar(EMPTY_CHAR);
+        } else {
+          setCharacters((prev) => [...prev, data.character]);
+          toast.success("Character created!");
+          setShowCreateModal(false);
+          setNewChar(EMPTY_CHAR);
+          await handleStartChat(data.character.id, data.character.name);
+        }
       }
     } catch (error) {
       console.error(error);
+      toast.error(error.message || "Failed to save character.");
     } finally {
       setIsCreating(false);
     }
   };
 
-  const executeUpgrade = () => {
-    setUserCredits((prev) => prev + 100);
-    setShowUpgradeModal(false);
-    alert(
-      "Successfully upgraded to c.ai+! Added 100 premium credits to your balance.",
-    );
+  const handleDeleteCharacter = async (char) => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(
+        `Delete "${char.name}"? All of its chat sessions and messages will be permanently removed.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/characters/${char.id}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to delete character");
+      setCharacters((prev) => prev.filter((c) => c.id !== char.id));
+      setChats((prev) => prev.filter((c) => c.characterId !== char.id));
+      toast.success("Character deleted.");
+    } catch (err) {
+      console.error(err);
+      toast.error(err.message || "Failed to delete character.");
+    }
   };
 
   // Derive unique recent characters from chat history
@@ -153,8 +233,12 @@ export default function HomeDashboard() {
   });
   const recentCharacters = Array.from(recentCharactersMap.values());
 
-  // Filter characters based on search
+  // Filter characters based on category tab + search
   const filteredCharacters = characters.filter((c) => {
+    if (activeCategory === "official" && c.isCustom) return false;
+    if (activeCategory === "community" && !c.isCustom) return false;
+    if (activeCategory === "mine" && c.userId !== session?.user?.id) return false;
+
     const q = searchQuery.toLowerCase();
     return (
       c.name.toLowerCase().includes(q) ||
@@ -162,8 +246,16 @@ export default function HomeDashboard() {
     );
   });
 
+  const visibleCharacters = filteredCharacters.slice(0, visibleCount);
+  const isLowCredits =
+    authStatus === "authenticated" &&
+    !session?.user?.customApiKey &&
+    typeof userCredits === "number" &&
+    userCredits < 10;
+
   return (
     <div className="flex h-dvh overflow-hidden bg-bg-page text-primary-text font-sans antialiased">
+      <Toaster position="top-right" />
       {/* MOBILE BACKDROP */}
       {showSidebar && (
         <div
@@ -186,7 +278,7 @@ export default function HomeDashboard() {
             </h1>
           </Link>
           <button
-            onClick={() => setShowCreateModal(true)}
+            onClick={openCreateModal}
             className="p-1.5 rounded text-secondary-text hover:text-primary-text transition cursor-pointer bg-bg-card-hover hover:bg-bg-elevated border border-divider/50"
             title="Create Character"
           >
@@ -242,7 +334,7 @@ export default function HomeDashboard() {
         {/* BOTTOM UPGRADE CAPSULE */}
         <div className="mt-4 pt-4 border-t border-divider/50">
           <button
-            onClick={() => router.push("/pricing")}
+            onClick={() => setShowUpgradeModal(true)}
             className="w-full mb-4 py-2.5 px-4 rounded-full border border-divider/50 bg-bg-page text-secondary-text hover:text-primary-text font-bold text-xs tracking-wider transition hover:bg-bg-card-hover cursor-pointer active:scale-[0.98]"
           >
             Upgrade to (c.ai+)
@@ -268,7 +360,7 @@ export default function HomeDashboard() {
                     {session.user.name || "User"}
                   </h4>
                   <p className="text-[10px] text-secondary-text truncate mt-0.5">
-                    Premium Credits: {userCredits}
+                    Premium Credits: {session.user.customApiKey ? "∞" : userCredits}
                   </p>
                 </div>
               </div>
@@ -328,14 +420,30 @@ export default function HomeDashboard() {
             </div>
           </div>
         </header>
+
+        {/* LOW CREDIT BANNER */}
+        {isLowCredits && (
+          <div className="mx-4 sm:mx-10 mb-4 px-4 py-3 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold flex items-center justify-between gap-3">
+            <span>
+              Your credit balance is running low ({userCredits} remaining).
+            </span>
+            <button
+              onClick={() => router.push("/pricing")}
+              className="shrink-0 px-3 py-1.5 rounded-full bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-[11px] transition cursor-pointer"
+            >
+              Buy Credits
+            </button>
+          </div>
+        )}
+
         {/* CHARACTER GRID */}
         <div className="flex flex-col gap-2 w-full h-full overflow-y-auto px-4 sm:px-10 pb-20">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
             <h3 className="text-sm font-bold text-primary-text flex items-center gap-2">
               <span>Explore Characters</span>
             </h3>
             <button
-              onClick={() => setShowCreateModal(true)}
+              onClick={openCreateModal}
               className="text-xs font-bold text-primary hover:text-primary-hover transition flex items-center gap-1.5 bg-primary/10 hover:bg-primary/20 px-3 py-1.5 rounded-full border border-primary/25"
             >
               <Plus className="w-3 h-3" />
@@ -343,56 +451,124 @@ export default function HomeDashboard() {
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-            {filteredCharacters.map((char, idx) => (
-              <div
-                key={idx}
-                onClick={() => handleStartChat(char.id, char.name)}
-                className="bg-bg-card border border-divider/50 rounded p-2 flex gap-4 hover:border-primary/50 hover:bg-bg-card-hover transition duration-200 cursor-pointer shadow-lg"
+          {/* CATEGORY TABS */}
+          <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-1">
+            {CATEGORIES.map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => {
+                  setActiveCategory(cat.id);
+                  setVisibleCount(INITIAL_VISIBLE);
+                }}
+                className={`px-3.5 py-1.5 rounded-full text-[11px] font-bold whitespace-nowrap border transition cursor-pointer ${
+                  activeCategory === cat.id
+                    ? "bg-primary text-primary-btn-text border-primary"
+                    : "bg-bg-card text-secondary-text border-divider/50 hover:text-primary-text hover:bg-bg-card-hover"
+                }`}
               >
-                {/* Character visual image */}
-                <div className="h-full w-20 aspect-[3/4] rounded overflow-hidden flex-shrink-0 bg-bg-page border border-divider/50 shadow flex items-center justify-center text-4xl">
-                  {char.profileUrl ||
-                  (char.avatar.length > 2 && char.avatar.startsWith("http")) ? (
-                    <img
-                      src={char.profileUrl || char.avatar}
-                      alt={char.name}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    char.avatar
-                  )}
-                </div>
-
-                {/* Info block */}
-                <div className="flex-1 flex flex-col justify-between overflow-hidden">
-                  <div>
-                    <h4 className="font-extrabold text-[13px] text-primary-text truncate leading-tight">
-                      {char.name}
-                    </h4>
-                    <span className="text-[10px] text-primary block font-semibold truncate mt-0.5">
-                      {char.isCustom
-                        ? "Community Character"
-                        : "Official Preset"}
-                    </span>
-                    <p className="text-[11px] text-secondary-text mt-1.5 leading-relaxed line-clamp-2 font-medium">
-                      {char.description}
-                    </p>
-                  </div>
-
-                  {/* Bottom metrics */}
-                  <div className="flex items-center gap-1.5 text-[10px] text-secondary-text font-bold mt-2.5">
-                    <MessageSquare className="w-3.5 h-3.5 text-primary" />
-                    <span>Chat Now</span>
-                  </div>
-                </div>
-              </div>
+                {cat.label}
+              </button>
             ))}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+            {visibleCharacters.map((char) => {
+              const isOwner =
+                session?.user?.id && char.userId === session.user.id;
+              const chatCount = char._count?.chats;
+              return (
+                <div
+                  key={char.id}
+                  onClick={() => handleStartChat(char.id, char.name)}
+                  className="bg-bg-card border border-divider/50 rounded p-2 flex gap-4 hover:border-primary/50 hover:bg-bg-card-hover transition duration-200 cursor-pointer shadow-lg relative group"
+                >
+                  {/* Owner actions */}
+                  {isOwner && (
+                    <div className="absolute top-1.5 right-1.5 flex gap-1 opacity-0 group-hover:opacity-100 transition z-10">
+                      <button
+                        type="button"
+                        title="Edit character"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditModal(char);
+                        }}
+                        className="p-1.5 rounded bg-bg-page/90 border border-divider/50 text-secondary-text hover:text-primary-text hover:border-primary/50 transition cursor-pointer"
+                      >
+                        <Pencil className="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        title="Delete character"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteCharacter(char);
+                        }}
+                        className="p-1.5 rounded bg-bg-page/90 border border-divider/50 text-secondary-text hover:text-rose-500 hover:border-rose-500/50 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Character visual image */}
+                  <div className="h-full w-20 aspect-[3/4] rounded overflow-hidden flex-shrink-0 bg-bg-page border border-divider/50 shadow flex items-center justify-center text-4xl">
+                    {char.profileUrl ||
+                    (char.avatar.length > 2 && char.avatar.startsWith("http")) ? (
+                      <img
+                        src={char.profileUrl || char.avatar}
+                        alt={char.name}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      char.avatar
+                    )}
+                  </div>
+
+                  {/* Info block */}
+                  <div className="flex-1 flex flex-col justify-between overflow-hidden">
+                    <div>
+                      <h4 className="font-extrabold text-[13px] text-primary-text truncate leading-tight">
+                        {char.name}
+                      </h4>
+                      <span className="text-[10px] text-primary block font-semibold truncate mt-0.5">
+                        {char.isCustom
+                          ? "Community Character"
+                          : "Official Preset"}
+                      </span>
+                      <p className="text-[11px] text-secondary-text mt-1.5 leading-relaxed line-clamp-2 font-medium">
+                        {char.description}
+                      </p>
+                    </div>
+
+                    {/* Bottom metrics */}
+                    <div className="flex items-center gap-1.5 text-[10px] text-secondary-text font-bold mt-2.5">
+                      <MessageSquare className="w-3.5 h-3.5 text-primary" />
+                      <span>
+                        {typeof chatCount === "number" && chatCount > 0
+                          ? `${chatCount} chat${chatCount === 1 ? "" : "s"}`
+                          : "Chat Now"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           {filteredCharacters.length === 0 && !loading && (
             <div className="text-center py-20 text-secondary-text">
-              <p>No characters found matching "{searchQuery}".</p>
+              <p>No characters found matching &ldquo;{searchQuery}&rdquo;.</p>
+            </div>
+          )}
+
+          {filteredCharacters.length > visibleCount && (
+            <div className="flex justify-center mt-6">
+              <button
+                onClick={() => setVisibleCount((c) => c + VISIBLE_STEP)}
+                className="px-5 py-2.5 rounded-full bg-bg-card border border-divider/50 text-xs font-bold text-secondary-text hover:text-primary-text hover:bg-bg-card-hover transition cursor-pointer"
+              >
+                Load more ({filteredCharacters.length - visibleCount} remaining)
+              </button>
             </div>
           )}
 
@@ -404,14 +580,14 @@ export default function HomeDashboard() {
           )}
         </div>
       </section>
-      {/* CREATE CHARACTER MODAL */}
+      {/* CREATE/EDIT CHARACTER MODAL */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn select-none">
           <div className="bg-bg-card border border-divider/50 rounded w-full max-w-xl shadow-2xl relative flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between p-5 border-b border-divider/50">
               <h2 className="text-lg font-bold text-primary-text flex items-center gap-2">
                 <Plus className="w-5 h-5 text-primary" />
-                Create Custom Character
+                {editingCharacter ? "Edit Character" : "Create Custom Character"}
               </h2>
               <button
                 onClick={() => setShowCreateModal(false)}
@@ -422,7 +598,7 @@ export default function HomeDashboard() {
             </div>
 
             <form
-              onSubmit={handleCreateCharacter}
+              onSubmit={handleSaveCharacter}
               className="p-5 overflow-y-auto custom-scrollbar flex-1 space-y-4"
             >
               <div className="grid grid-cols-2 gap-4">
@@ -580,7 +756,11 @@ export default function HomeDashboard() {
                   ) : (
                     <Plus className="w-3.5 h-3.5" />
                   )}
-                  {isCreating ? "Deploying..." : "Create Character"}
+                  {isCreating
+                    ? "Saving..."
+                    : editingCharacter
+                      ? "Save Changes"
+                      : "Create Character"}
                 </button>
               </div>
             </form>
@@ -604,9 +784,9 @@ export default function HomeDashboard() {
                 Upgrade to character.ai+
               </h3>
               <p className="text-xs text-secondary-text max-w-sm mx-auto leading-relaxed mb-6 font-semibold">
-                Gain instant access to unlimited thinking engine telemetry,
-                zero-wait premium response models (GPT-4o, DeepSeek R1), and
-                +100 bonus credits!
+                Unlock premium response models (GPT-4o, DeepSeek R1, Claude
+                3.5) and top up your credit balance with flexible one-time
+                packs.
               </p>
               <div className="flex gap-3">
                 <button
@@ -616,10 +796,10 @@ export default function HomeDashboard() {
                   Go Back
                 </button>
                 <button
-                  onClick={executeUpgrade}
+                  onClick={() => router.push("/pricing")}
                   className="flex-1 py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-black font-extrabold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg active:scale-95"
                 >
-                  Upgrade Now
+                  View Plans
                 </button>
               </div>
             </div>

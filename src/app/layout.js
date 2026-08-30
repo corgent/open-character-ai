@@ -19,7 +19,7 @@ export const metadata = {
 };
 
 export default function RootLayout({ children }) {
-  const theme = config?.theme || "slate-indigo";
+  const theme = config?.theme || "midnight";
 
   return (
     <html lang="en" className={`h-full scroll-smooth ${inter.variable} ${outfit.variable}`} data-theme={theme}>
