@@ -4,11 +4,10 @@ import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { useSession, signIn, signOut } from "next-auth/react";
 import Link from "next/link";
+import toast, { Toaster } from "react-hot-toast";
 import {
-  Sparkles,
   Send,
   Sliders,
-  Image as ImageIcon,
   Cpu,
   LogOut,
   Loader2,
@@ -16,10 +15,15 @@ import {
   Plus,
   History,
   LogIn,
-  Flame,
   X,
   Menu,
+  RotateCcw,
+  Pencil,
+  Trash2,
 } from "lucide-react";
+import { getModelCost } from "@/lib/config";
+
+const DEFAULT_MODEL = "google/gemini-2.5-flash";
 
 // A simple custom Markdown renderer for premium message layout
 function renderMarkdown(text) {
@@ -172,13 +176,31 @@ function parseInlineMarkdown(text) {
   return parts;
 }
 
+// Human-friendly relative timestamp ("5m ago", "2h ago", fallback to date)
+function formatRelativeTime(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  const diffMs = Date.now() - then;
+  const minutes = Math.floor(diffMs / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default function ChatConsole({ params }) {
   // Await the routing parameters per Next.js 16 standards
   const resolvedParams = use(params);
   const chatId = resolvedParams.id;
 
   const router = useRouter();
-  const { data: session, status: authStatus } = useSession();
+  const { data: session, status: authStatus, update: updateSession } = useSession();
 
   // Dialog layers
   const [messages, setMessages] = useState([]);
@@ -186,13 +208,16 @@ export default function ChatConsole({ params }) {
   const [isTyping, setIsTyping] = useState(false);
   const [sidebarChats, setSidebarChats] = useState([]);
   const [activeChat, setActiveChat] = useState(null);
+  const [chatNotFound, setChatNotFound] = useState(false);
 
   // Advanced parameters state
   const [showConfig, setShowConfig] = useState(false);
-  const [model, setModel] = useState("openai/gpt-4o");
+  const [model, setModel] = useState(DEFAULT_MODEL);
   const [temperature, setTemperature] = useState(1.0);
   const [maxTokens, setMaxTokens] = useState(2048);
   const [reasoning, setReasoning] = useState(false);
+  const [systemPromptOverride, setSystemPromptOverride] = useState("");
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   // Vision attachments & global gallery state
   const [attachedImage, setAttachedImage] = useState(null);
@@ -204,7 +229,7 @@ export default function ChatConsole({ params }) {
   const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
 
-  // Simulated upgrade modal trigger state
+  // Upgrade modal trigger state
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [userCredits, setUserCredits] = useState(50);
 
@@ -213,18 +238,46 @@ export default function ChatConsole({ params }) {
 
   // Load chat conversations and historic dialog details
   useEffect(() => {
-    if (authStatus === "authenticated") {
-      fetchSidebarChats();
-      fetchActiveChatDetails();
-      fetchMessages();
-    }
+    if (authStatus !== "authenticated") return;
+    const load = async () => {
+      try {
+        const res = await fetch("/api/chats");
+        const data = await res.json();
+        const allChats = data.chats || [];
+        setSidebarChats(allChats);
+        const matching = allChats.find((c) => c.id === chatId);
+        if (matching) {
+          setActiveChat(matching);
+          setModel(matching.model || DEFAULT_MODEL);
+          setTemperature(matching.temperature ?? 1.0);
+          setMaxTokens(matching.maxTokens ?? 2048);
+          setReasoning(matching.reasoning ?? false);
+          setSystemPromptOverride(matching.systemPromptOverride || "");
+        } else {
+          setChatNotFound(true);
+        }
+
+        const msgRes = await fetch(`/api/chats/${chatId}/messages`);
+        const msgData = await msgRes.json();
+        if (msgData.messages) {
+          setMessages(msgData.messages);
+        } else if (msgRes.status === 404) {
+          setChatNotFound(true);
+        }
+      } catch (err) {
+        console.error("Failed loading chat workspace", err);
+      }
+    };
+    load();
   }, [authStatus, chatId]);
 
-  // Handle credits binding from session or custom increments
+  // Handle credits binding from session or custom increments.
+  // Deferred to a microtask to satisfy react-hooks/set-state-in-effect.
   useEffect(() => {
-    if (session?.user) {
-      setUserCredits(session.user.credits);
-    }
+    if (session?.user?.credits === undefined) return;
+    const credits = session.user.credits;
+    const id = setTimeout(() => setUserCredits(credits), 0);
+    return () => clearTimeout(id);
   }, [session]);
 
   // Smooth scroll dialogue thread on new messages
@@ -266,7 +319,39 @@ export default function ChatConsole({ params }) {
       }
     } catch (err) {
       console.error("Failed starting new chat", err);
+      toast.error("Failed to start a new chat.");
     }
+  };
+
+  const handleDeleteChat = async (targetChatId) => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Delete this chat session and all of its messages?")
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/chats/${targetChatId}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to delete chat");
+      toast.success("Chat deleted.");
+      setSidebarChats((prev) => prev.filter((c) => c.id !== targetChatId));
+      if (targetChatId === chatId) {
+        router.push("/");
+      }
+    } catch (err) {
+      console.error("Failed deleting chat", err);
+      toast.error(err.message || "Failed to delete chat.");
+    }
+  };
+
+  // Applies persisted per-chat tuning settings into local state
+  const applyChatSettings = (chat) => {
+    setModel(chat.model || DEFAULT_MODEL);
+    setTemperature(chat.temperature ?? 1.0);
+    setMaxTokens(chat.maxTokens ?? 2048);
+    setReasoning(chat.reasoning ?? false);
+    setSystemPromptOverride(chat.systemPromptOverride || "");
   };
 
   const fetchActiveChatDetails = async () => {
@@ -277,10 +362,47 @@ export default function ChatConsole({ params }) {
         const matching = data.chats.find((c) => c.id === chatId);
         if (matching) {
           setActiveChat(matching);
+          applyChatSettings(matching);
+        } else {
+          setChatNotFound(true);
         }
       }
     } catch (err) {
       console.error("Failed loading chat room details", err);
+    }
+  };
+
+  // Persist tuning panel settings to the chat record
+  const saveChatSettings = async (overrides = {}) => {
+    if (!activeChat?.id) return;
+    setIsSavingSettings(true);
+    try {
+      const payload = {
+        model,
+        temperature,
+        maxTokens,
+        reasoning,
+        systemPromptOverride,
+        ...overrides,
+      };
+      const res = await fetch(`/api/chats/${activeChat.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.chat) setActiveChat((prev) => ({ ...prev, ...data.chat }));
+        toast.success("Settings saved for this chat.");
+      } else {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to save settings");
+      }
+    } catch (err) {
+      console.error("Failed saving chat settings", err);
+      toast.error(err.message || "Failed to save settings.");
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -290,6 +412,8 @@ export default function ChatConsole({ params }) {
       const data = await res.json();
       if (data.messages) {
         setMessages(data.messages);
+      } else if (res.status === 404) {
+        setChatNotFound(true);
       }
     } catch (err) {
       console.error("Error retrieving dialog history", err);
@@ -324,9 +448,7 @@ export default function ChatConsole({ params }) {
       }
     } catch (err) {
       console.error("Failed uploading vision asset", err);
-      alert(
-        "Vision upload failed. Make sure your credit balance is greater than 0.",
-      );
+      toast.error("Image upload failed. Please try again.");
     } finally {
       setIsUploading(false);
     }
@@ -372,7 +494,7 @@ export default function ChatConsole({ params }) {
   // Message submissions
   const handleSendMessage = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if ((!inputMessage.trim() && attachedImages.length === 0) || isTyping)
+    if ((!inputMessage.trim() && attachedImages.length === 0) || isTyping || isUploading)
       return;
 
     const userText = inputMessage;
@@ -410,14 +532,23 @@ export default function ChatConsole({ params }) {
           temperature,
           maxTokens,
           reasoning,
+          systemPromptOverride: systemPromptOverride || null,
         }),
       });
 
       if (res.status === 402) {
         const errData = await res.json();
-        alert(errData.error || "Insufficient credits! Please upgrade to c.ai+");
+        toast.error(
+          errData.error || "Insufficient credits! Please buy more to continue.",
+        );
+        setShowUpgradeModal(true);
         // Remove optimistic user message
         setMessages((prev) => prev.filter((m) => m.id !== tempUserMsg.id));
+        setInputMessage(userText);
+        if (userImg) {
+          setAttachedImage(userImg);
+          setAttachedImages([userImg]);
+        }
         return;
       }
 
@@ -433,11 +564,17 @@ export default function ChatConsole({ params }) {
           data.userMessage,
           data.assistantMessage,
         ]);
-        setUserCredits(data.remainingCredits);
+        if (typeof data.remainingCredits === "number") {
+          setUserCredits(data.remainingCredits);
+          // Keep the NextAuth session credit balance in sync
+          updateSession({ credits: data.remainingCredits });
+        }
+        // Pick up the auto-generated chat title
+        fetchSidebarChats();
       }
     } catch (err) {
       console.error("Post generation error", err);
-      alert(
+      toast.error(
         err.message ||
           "An unexpected error occurred. Credits refunded if deducted.",
       );
@@ -447,33 +584,107 @@ export default function ChatConsole({ params }) {
     }
   };
 
-  // Trigger simulated upgrade credits flow
-  const executeUpgrade = async () => {
+  // Deletes the last assistant reply (and optionally its user prompt), then
+  // regenerates a fresh response from the same user input.
+  const handleRegenerate = async () => {
+    if (isTyping || messages.length === 0) return;
+
+    const lastAssistantIdx = [...messages]
+      .map((m, i) => ({ m, i }))
+      .reverse()
+      .find(({ m }) => m.role === "assistant" && !String(m.id).startsWith("temp_"))?.i;
+
+    if (lastAssistantIdx === undefined) return;
+
+    // Find the user message that produced it
+    const userIdx = [...messages]
+      .slice(0, lastAssistantIdx)
+      .map((m, i) => ({ m, i }))
+      .reverse()
+      .find(({ m }) => m.role === "user")?.i;
+
+    if (userIdx === undefined) return;
+
+    const lastAssistant = messages[lastAssistantIdx];
+    const lastUser = messages[userIdx];
+
+    setIsTyping(true);
     try {
-      // Simulate adding 100 credits trigger inside a fake checkout
-      setUserCredits((prev) => prev + 100);
-      setShowUpgradeModal(false);
-      alert(
-        "Successfully upgraded to c.ai+! Added 100 premium credits to your balance.",
-      );
+      // Resend the same prompt FIRST — the messages POST re-creates the user
+      // message server-side, so we only delete the stale exchange once the
+      // regeneration has succeeded. This keeps the original messages intact
+      // if the call fails (e.g. insufficient credits).
+      const res = await fetch(`/api/chats/${chatId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: lastUser.content,
+          imageUrl: lastUser.imageUrl || null,
+          model,
+          temperature,
+          maxTokens,
+          reasoning,
+          systemPromptOverride: systemPromptOverride || null,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || "Regeneration failed");
+      }
+
+      const data = await res.json();
+      if (data.assistantMessage) {
+        // Regeneration succeeded — now remove the stale exchange server-side.
+        await fetch(`/api/chats/${chatId}/messages/${lastAssistant.id}`, {
+          method: "DELETE",
+        });
+        await fetch(`/api/chats/${chatId}/messages/${lastUser.id}`, {
+          method: "DELETE",
+        });
+
+        setMessages((prev) => [
+          ...prev.filter((m) => m.id !== lastAssistant.id && m.id !== lastUser.id),
+          data.userMessage,
+          data.assistantMessage,
+        ]);
+        if (typeof data.remainingCredits === "number") {
+          setUserCredits(data.remainingCredits);
+          updateSession({ credits: data.remainingCredits });
+        }
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Regenerate error", err);
+      toast.error(err.message || "Failed to regenerate the response.");
+      fetchMessages(); // resync with server truth (original messages intact)
+    } finally {
+      setIsTyping(false);
     }
   };
 
-  const getCostRating = () => {
-    const isPremium =
-      model.startsWith("deepseek/") ||
-      model.startsWith("openai/") ||
-      model.startsWith("anthropic/") ||
-      model.includes("pro") ||
-      model.includes("o1") ||
-      model.includes("o3");
-    return isPremium ? 10 : 1;
+  // Loads the last user message back into the composer for edit & resend
+  const handleEditLastMessage = () => {
+    const lastUser = [...messages]
+      .reverse()
+      .find((m) => m.role === "user" && !String(m.id).startsWith("temp_"));
+    if (!lastUser) return;
+    setInputMessage(lastUser.content || "");
   };
+
+  const canRegenerate =
+    !isTyping &&
+    messages.some((m) => m.role === "assistant" && !String(m.id).startsWith("temp_")) &&
+    messages.some((m) => m.role === "user" && !String(m.id).startsWith("temp_"));
+
+  const isLowCredits =
+    authStatus === "authenticated" &&
+    !session?.user?.customApiKey &&
+    typeof userCredits === "number" &&
+    userCredits < getModelCost(model);
 
   return (
     <div className="flex h-dvh overflow-hidden bg-zinc-950 text-gray-100 font-sans antialiased">
+      <Toaster position="top-right" />
       {/* MOBILE OVERLAY */}
       {showSidebar && (
         <div
@@ -535,39 +746,42 @@ export default function ChatConsole({ params }) {
                   c.character.name.toLowerCase().replace(/ /g, "-") ===
                   resolvedParams.character_name.toLowerCase(),
               )
-              .map((c, idx, arr) => {
+              .map((c) => {
                 const isActive = c.id === chatId;
-                const dateStr = new Date(c.createdAt).toLocaleDateString(
-                  undefined,
-                  {
-                    month: "short",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  },
-                );
                 return (
-                  <Link
+                  <div
                     key={c.id}
-                    href={`/${c.character.name.toLowerCase().replace(/ /g, "-")}/${c.id}`}
-                    className={`w-full p-3 rounded flex items-center justify-between border transition-all duration-200 ${
+                    className={`group w-full rounded flex items-center justify-between border transition-all duration-200 ${
                       isActive
                         ? "bg-bg-card-hover border-divider text-primary font-bold"
                         : "bg-bg-page/40 border-transparent text-secondary-text hover:bg-bg-card-hover hover:text-primary-text"
                     }`}
                   >
-                    <div className="overflow-hidden flex-1">
+                    <Link
+                      href={`/${c.character.name.toLowerCase().replace(/ /g, "-")}/${c.id}`}
+                      className="flex-1 p-3 overflow-hidden"
+                    >
                       <h4 className="text-xs font-bold truncate">
-                        Session {c.id.substring(0, 10)}...
+                        {c.title || `Session ${c.id.substring(0, 10)}...`}
                       </h4>
                       <p className="text-[10px] text-zinc-500 leading-normal mt-0.5">
-                        {dateStr}
+                        {formatRelativeTime(c.createdAt)}
                       </p>
+                    </Link>
+                    <div className="flex items-center shrink-0 pr-2 gap-1">
+                      {isActive && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteChat(c.id)}
+                        title="Delete chat session"
+                        className="p-1 rounded text-zinc-500 hover:text-rose-500 hover:bg-zinc-800 transition opacity-0 group-hover:opacity-100"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                    {isActive && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-blue-500 shrink-0 ml-2" />
-                    )}
-                  </Link>
+                  </div>
                 );
               })}
           </div>
@@ -611,7 +825,9 @@ export default function ChatConsole({ params }) {
               {/* DYNAMIC SEED CREDIT COUNTER PROFILE SHIELD */}
               <div className="flex items-center justify-center gap-2 text-xs font-bold text-secondary-text">
                 <span>Remaining Credits:</span>
-                <span className="text-sm text-primary">{userCredits}</span>
+                <span className="text-sm text-primary">
+                  {session.user.customApiKey ? "∞" : userCredits}
+                </span>
               </div>
             </div>
           ) : (
@@ -708,6 +924,9 @@ export default function ChatConsole({ params }) {
                                       isPublic: data.character.isPublic,
                                     },
                                   }));
+                                  toast.success(
+                                    `Character is now ${newPublicStatus ? "public" : "private"}.`,
+                                  );
                                 }
                               }
                             } catch (err) {
@@ -715,6 +934,7 @@ export default function ChatConsole({ params }) {
                                 "Failed to toggle character visibility",
                                 err,
                               );
+                              toast.error("Failed to update visibility.");
                             }
                           }}
                           className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${activeChat.character.isPublic ? "bg-primary" : "bg-bg-card-hover"}`}
@@ -745,7 +965,26 @@ export default function ChatConsole({ params }) {
         </header>
         {/* MAIN BODY AREA (CHATS + PARAMETERS PANEL) */}
         <div className="flex-1 flex justify-center overflow-hidden relative pb-10">
-          {/* MESSAGES LOG VIEW */}
+          {/* CHAT NOT FOUND STATE */}
+          {chatNotFound ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center p-6">
+              <span className="text-5xl">🕳️</span>
+              <h2 className="text-lg font-black text-primary-text">
+                Chat session not found
+              </h2>
+              <p className="text-xs text-secondary-text max-w-sm">
+                This conversation may have been deleted or belongs to a
+                different account.
+              </p>
+              <button
+                onClick={() => router.push("/")}
+                className="mt-2 px-5 py-2.5 rounded-full bg-primary hover:bg-primary-hover text-white text-xs font-bold transition cursor-pointer"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          ) : (
+          /* MESSAGES LOG VIEW */
           <div className="flex-1 overflow-y-auto p-3 md:p-6 space-y-6 flex flex-col items-center bg-bg-page/10 custom-scrollbar relative w-full">
             <div className="space-y-6 flex flex-col w-full lg:max-w-[70%]">
               {messages.map((m) => {
@@ -801,11 +1040,8 @@ export default function ChatConsole({ params }) {
                           {isUser ? "You" : activeChat?.character.name || "AI"}
                         </span>
                         <span>•</span>
-                        <span>
-                          {new Date(m.createdAt).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
+                        <span title={new Date(m.createdAt).toLocaleString()}>
+                          {formatRelativeTime(m.createdAt)}
                         </span>
                       </div>
 
@@ -838,6 +1074,30 @@ export default function ChatConsole({ params }) {
                   </div>
                 );
               })}
+
+              {/* MESSAGE ACTION BAR */}
+              {messages.length > 1 && !isTyping && (
+                <div className="flex items-center gap-2 self-start">
+                  <button
+                    type="button"
+                    onClick={handleRegenerate}
+                    disabled={!canRegenerate}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-bg-card border border-divider/50 text-[10px] font-bold text-secondary-text hover:text-primary-text hover:bg-bg-card-hover transition disabled:opacity-40 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Regenerate response</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEditLastMessage}
+                    disabled={!canRegenerate}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-bg-card border border-divider/50 text-[10px] font-bold text-secondary-text hover:text-primary-text hover:bg-bg-card-hover transition disabled:opacity-40 cursor-pointer"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>Edit last message</span>
+                  </button>
+                </div>
+              )}
 
               {/* TYPING LOADER STATUS */}
               {isTyping && (
@@ -885,6 +1145,7 @@ export default function ChatConsole({ params }) {
             </div>
             <div ref={chatEndRef} />
           </div>
+          )}
 
           {/* ADVANCED PARAMETERS CONFIG SIDE PANEL (SLIDES FROM RIGHT) */}
           <aside
@@ -922,8 +1183,8 @@ export default function ChatConsole({ params }) {
                   </option>
                 </select>
                 <span className="block text-[10px] text-zinc-500 mt-1.5 italic font-semibold">
-                  Cost: {getCostRating()} credit{getCostRating() > 1 ? "s" : ""}{" "}
-                  per message.
+                  Cost: {getModelCost(model)} credit
+                  {getModelCost(model) > 1 ? "s" : ""} per message.
                 </span>
               </div>
 
@@ -997,15 +1258,61 @@ export default function ChatConsole({ params }) {
                   <span>Long (4096)</span>
                 </div>
               </div>
+
+              {/* SYSTEM PROMPT OVERRIDE */}
+              <div>
+                <label className="block text-[10px] font-black uppercase text-zinc-500 tracking-wider mb-2">
+                  System Prompt Override
+                </label>
+                <textarea
+                  value={systemPromptOverride}
+                  onChange={(e) => setSystemPromptOverride(e.target.value)}
+                  rows={5}
+                  placeholder={
+                    activeChat?.character?.systemPrompt
+                      ? `Default: ${activeChat.character.systemPrompt.slice(0, 120)}...`
+                      : "Override the character's default system prompt for this chat only..."
+                  }
+                  className="w-full bg-bg-page border border-divider/50 rounded p-3 text-xs text-primary-text focus:outline-none focus:border-primary/80 transition resize-none placeholder-zinc-600 leading-relaxed"
+                />
+                <span className="block text-[9px] text-zinc-600 font-semibold mt-1 italic">
+                  Leave blank to use the character&rsquo;s default instructions.
+                </span>
+              </div>
             </div>
 
-            <div className="mt-8 pt-4 border-t border-divider/50">
+            <div className="mt-8 pt-4 border-t border-divider/50 space-y-2">
+              <button
+                onClick={() => saveChatSettings()}
+                disabled={isSavingSettings}
+                className="w-full py-2.5 rounded bg-primary hover:bg-primary-hover text-white font-bold text-xs tracking-wide transition cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isSavingSettings ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : null}
+                {isSavingSettings ? "Saving..." : "Save to This Chat"}
+              </button>
               <button
                 onClick={() => {
-                  setModel("openai/gpt-4o");
-                  setTemperature(1.0);
-                  setMaxTokens(2048);
-                  setReasoning(false);
+                  const defaults = {
+                    model: DEFAULT_MODEL,
+                    temperature: 1.0,
+                    maxTokens: 2048,
+                    reasoning: false,
+                    systemPromptOverride: "",
+                  };
+                  setModel(defaults.model);
+                  setTemperature(defaults.temperature);
+                  setMaxTokens(defaults.maxTokens);
+                  setReasoning(defaults.reasoning);
+                  setSystemPromptOverride(defaults.systemPromptOverride);
+                  saveChatSettings({
+                    model: null,
+                    temperature: null,
+                    maxTokens: null,
+                    reasoning: null,
+                    systemPromptOverride: null,
+                  });
                 }}
                 className="w-full py-2.5 rounded border border-dashed border-divider/50 hover:border-divider text-secondary-text hover:text-primary-text font-bold text-xs tracking-wide transition cursor-pointer"
               >
@@ -1014,6 +1321,22 @@ export default function ChatConsole({ params }) {
             </div>
           </aside>
         </div>
+
+        {/* LOW CREDIT WARNING STRIP */}
+        {isLowCredits && !chatNotFound && (
+          <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-400 text-[11px] font-bold flex items-center gap-3 shadow-lg">
+            <span>
+              Low balance — this model costs {getModelCost(model)} credit
+              {getModelCost(model) > 1 ? "s" : ""} per message.
+            </span>
+            <button
+              onClick={() => router.push("/pricing")}
+              className="px-2.5 py-1 rounded-full bg-amber-500 hover:bg-amber-400 text-neutral-950 text-[10px] font-black transition cursor-pointer"
+            >
+              Top Up
+            </button>
+          </div>
+        )}
 
         {/* INPUT FORM WITH EXPANDABLE CHATBOX AND IMAGES PLACEMENT */}
         <footer className="absolute bottom-0 left-0 w-full z-20 p-4">
@@ -1179,11 +1502,13 @@ export default function ChatConsole({ params }) {
                     type="submit"
                     disabled={
                       (!inputMessage.trim() && attachedImages.length === 0) ||
-                      isTyping
+                      isTyping ||
+                      isUploading
                     }
                     className={`h-8 w-8 rounded-full transition duration-200 flex items-center justify-center cursor-pointer shrink-0 ${
                       (!inputMessage.trim() && attachedImages.length === 0) ||
-                      isTyping
+                      isTyping ||
+                      isUploading
                         ? "bg-zinc-700/50 text-zinc-500 cursor-not-allowed"
                         : "bg-emerald-500 hover:bg-emerald-400 text-white shadow-md active:scale-95"
                     }`}
@@ -1209,6 +1534,44 @@ export default function ChatConsole({ params }) {
           </form>
         </footer>
       </section>
+
+      {/* PREMIUM UPGRADE MODAL */}
+      {showUpgradeModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn select-none">
+          <div className="bg-bg-card border border-divider/55 rounded w-full max-w-md overflow-hidden shadow-2xl relative">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500" />
+            <div className="p-6 pt-8 text-center">
+              <div className="h-16 w-16 bg-amber-500/10 border border-amber-500/30 rounded flex items-center justify-center text-4xl mx-auto mb-4 animate-bounce">
+                👑
+              </div>
+              <span className="px-3.5 py-1 text-[10px] uppercase font-black tracking-widest text-amber-500 bg-amber-950/30 rounded-full border border-amber-800/40 shadow-inner">
+                c.ai+ Premium tier
+              </span>
+              <h3 className="font-black text-2xl mt-4 mb-2 text-primary-text tracking-tight">
+                You&rsquo;re out of credits
+              </h3>
+              <p className="text-xs text-secondary-text max-w-sm mx-auto leading-relaxed mb-6 font-semibold">
+                Top up your balance with a flexible credit pack, or add your
+                own MuAPI key from the dashboard to chat for free.
+              </p>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowUpgradeModal(false)}
+                  className="flex-1 py-3.5 bg-bg-page hover:bg-bg-card-hover text-secondary-text hover:text-primary-text rounded font-bold text-xs uppercase tracking-wider transition border border-divider/50 cursor-pointer"
+                >
+                  Go Back
+                </button>
+                <button
+                  onClick={() => router.push("/pricing")}
+                  className="flex-1 py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-black font-extrabold text-xs uppercase tracking-wider transition cursor-pointer shadow-lg active:scale-95"
+                >
+                  View Plans
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ========================================================================= */}
       {/* 3. REUSE IMAGE GALLERY BOTTOM PANEL                                       */}

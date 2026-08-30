@@ -29,8 +29,8 @@ Open Character AI is a production-ready, highly-optimized AI web application. Ou
 - **Production-Ready SaaS** — Complete with Google OAuth and Stripe Checkout workflows built-in.
 - **Glassmorphic Chat UI** — A premium dark mode user interface featuring message bubbles, typing indicators, custom avatars, and a slide-out parameter console.
 - **Interactive Character Builder** — Create public or private personas with custom system prompts, greets, and avatars.
-- **Dynamic LLM Tuning** — Slide-out drawer configuration allows adjusting Temperature, Max Tokens, and System Prompt values per chat thread.
-- **Persistent Chat History** — All conversations, customized parameters, and creations are securely saved to a PostgreSQL database via Prisma ORM.
+- **Dynamic LLM Tuning** — Slide-out drawer configuration allows adjusting the LLM engine, Temperature, Max Tokens, Deep Reasoning, and a per-chat System Prompt override. Settings are persisted per chat thread and restored on reload.
+- **Persistent Chat History** — All conversations, customized parameters, and creations are securely saved to a PostgreSQL database via Prisma ORM. Sessions are auto-titled from the first message and can be deleted individually.
 
 ![Open Character AI Screenshot](https://cdn.muapi.ai/data/2/566606463946/Screenshot_2026-05-19_174317.png)
 
@@ -39,13 +39,16 @@ Open Character AI is a production-ready, highly-optimized AI web application. Ou
 ## ✨ Core Features
 
 ### 💬 Interactive Chat Studio (`/[character_name]/[id]`)
-- Fully-featured messaging workspace with typing simulation.
-- **LLM Tuning Panel** — Slider controls to dynamically tweak `Temperature`, `Max Tokens`, and edit/override `System Prompt` instructions per session.
+- Fully-featured messaging workspace with typing simulation, vision image attachments, and a cross-chat image gallery.
+- **LLM Tuning Panel** — Slider controls to dynamically tweak `Model`, `Temperature`, `Max Tokens`, `Reasoning`, and edit/override `System Prompt` instructions per session (saved server-side per chat).
+- **Message Operations** — Regenerate the last response or edit & resend your last prompt in one click.
+- **Session Management** — Rename-free auto-titled sessions with per-session delete.
 - Message history persisted in database with real-time UI synchronization.
 
 ### 🎭 Dashboard & Character Builder (`/`)
-- Choose from featured, anime, helper, or gaming categories.
+- Browse Featured, Community, or your own characters via category tabs, with live search and incremental loading.
 - Create new companion personas via a visual builder modal specifying Name, Description, Greeting Message, Personality, System Instructions, Avatar, and Visibility (Public vs. Private).
+- Edit or permanently delete your own characters directly from the dashboard cards.
 
 ### 💳 Stripe Credit Billing (`/pricing`)
 - Select credit pack plans for premium LLM interactions.
@@ -92,7 +95,7 @@ To successfully deploy and run, populate the following environment variables in 
 | | `STRIPE_WEBHOOK_SECRET` | Webhook secret for resolving credit purchases |
 | **AI Generator / LLM** | `MU_API_KEY` | API key from [muapi.ai](https://muapi.ai?utm_source=github&utm_medium=readme&utm_campaign=open-character-ai) (for model routing/API calls) |
 | | `WEBHOOK_URL` | Webhook URL endpoint for async events |
-| **UI Configuration** | `NEXT_PUBLIC_THEME` | Dynamic UI color theme accent: Choose from `indigo`, `emerald`, `rose`, `amber`, `violet` |
+| **UI Configuration** | `NEXT_PUBLIC_THEME` | Dynamic UI color theme accent: Choose from `midnight`, `indigo`, `emerald`, `rose`, `amber`, `violet`, `cyberpunk`, `sunset` (must match a `data-theme` block in `globals.css`) |
 
 ### 🚀 Launching on Vercel: Step-by-Step
 
@@ -101,7 +104,7 @@ To successfully deploy and run, populate the following environment variables in 
 3. **Configure Environment Variables**: Add all variables listed in the settings tab.
 4. **Deploy**: Build with Vercel. Next.js page generation will run Prisma client generation automatically via our script config.
 5. **Database Push**: Synchronize database models before launching.
-6. **Webhooks Setup**: Configure Stripe checkout webhook to point to `/api/stripe/webhook`.
+6. **Webhooks Setup**: Configure the Stripe checkout webhook to point to `/api/webhook/stripe` (event: `checkout.session.completed`). Locally you can forward events with `stripe listen --forward-to localhost:3000/api/webhook/stripe`.
 
 ---
 
@@ -144,31 +147,40 @@ The console should now be active on `http://localhost:3000`.
 ```
 character-ai/
 ├── prisma/
-│   └── schema.prisma           # Postgres schema (User, Account, Session, Character, Chat, Message, Creation, UserImage)
+│   └── schema.prisma           # Postgres schema (User, Account, Session, Character, Chat, Message, Creation, UserImage, Payment)
 ├── src/
 │   ├── app/                    # Next.js App Router
 │   │   ├── page.js             # Dashboard / Character selection & custom character builder modal
 │   │   ├── layout.js           # Root layout importing fonts, background styles, and Providers
-│   │   ├── globals.css         # Global cyber/dark styling utilities and variables
+│   │   ├── globals.css         # Global dark styling utilities and theme variables
 │   │   ├── pricing/            # Credit purchase plans & checkout triggers (/pricing)
+│   │   │   └── page.js
+│   │   ├── login/              # Sign-in page (Google OAuth or MuAPI key)
 │   │   │   └── page.js
 │   │   ├── [character_name]/[id]/
 │   │   │   └── page.js         # Interactive chat interface with parameter controls and message list
 │   │   └── api/
 │   │       ├── auth/           # NextAuth Google OAuth handler
-│   │       ├── characters/     # GET / POST characters (custom builder handler)
-│   │       ├── chats/          # GET / POST chats, messages list, parameters tuning
-│   │       │   ├── [id]/
-│   │       │   │   └── messages/   # GET / POST messages for a specific chat
-│   │       │   └── route.js
+│   │       ├── characters/     # GET / POST / PATCH characters; [id]/ PATCH & DELETE (owner-only)
+│   │       ├── chats/          # GET / POST chats; [id]/ PATCH (settings/title) & DELETE
+│   │       │   └── [id]/
+│   │       │       ├── route.js
+│   │       │       └── messages/ # GET / POST messages; [messageId]/ DELETE
+│   │       ├── checkout/       # Stripe checkout session creation
+│   │       ├── webhook/stripe/ # Stripe payment webhook (idempotent crediting)
 │   │       ├── images/         # Upload/CDN helpers for avatars
-│   │       ├── stripe/         # Checkout session creation & payment webhooks
+│   │       ├── user/apikey/    # Manage per-user custom MuAPI key
 │   │       └── upload/         # File uploading helper endpoint
 │   ├── components/
-│   │   └── Providers.jsx       # NextAuth SessionProvider wrapper
+│   │   ├── Navbar.js           # Top navigation with credit balance + API key modal
+│   │   └── Footer.js
 │   └── lib/
 │       ├── auth.js             # NextAuth configuration with Google OAuth and Prisma adapter
-│       └── prisma.js           # Global PrismaClient singleton with PG adapter
+│       ├── config.js           # Central config: plans, model credit costs, theme
+│       ├── prisma.js           # Global PrismaClient singleton with PG adapter
+│       ├── stripe.js           # Stripe client singleton
+│       └── services/           # BillingService & UserService business logic
+├── tests/                      # Vitest unit tests (credit math, model costs, billing)
 └── next.config.mjs             # Next.js configuration
 ```
 

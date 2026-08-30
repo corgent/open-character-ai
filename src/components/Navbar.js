@@ -25,25 +25,16 @@ export default function Navbar() {
   const isApiKeyActive = Boolean(session?.user?.customApiKey);
 
   useEffect(() => {
-    if (session?.user?.customApiKey) {
-      setApiKeyInput(session.user.customApiKey);
-    }
+    if (!session?.user?.customApiKey) return;
+    const key = session.user.customApiKey;
+    const id = setTimeout(() => setApiKeyInput(key), 0);
+    return () => clearTimeout(id);
   }, [session?.user?.customApiKey]);
 
-  const appMatch = pathname ? pathname.match(/^\/app\/([^\/]+)/) : null;
-  const currentAppId = appMatch ? appMatch[1] : null;
-
-  const navLinks = currentAppId
-    ? [
-        { name: "Workspace", path: `/app/${currentAppId}` },
-        { name: "Gallery", path: `/app/${currentAppId}/gallery` },
-        { name: "Pricing", path: `/app/${currentAppId}/pricing` },
-      ]
-    : [
-        { name: "Workspace", path: "/" },
-        { name: "Gallery", path: "/gallery" },
-        { name: "Pricing", path: "/pricing" },
-      ];
+  const navLinks = [
+    { name: "Workspace", path: "/" },
+    { name: "Pricing", path: "/pricing" },
+  ];
 
   const handleSaveApiKey = async (e) => {
     e.preventDefault();
@@ -145,7 +136,7 @@ export default function Navbar() {
           
           {/* Vercel Deploy Button */}
           <a
-            href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FSamurAIGPT%2Fcommon-saas-template"
+            href="https://vercel.com/new/clone?repository-url=https://github.com/Anil-matcha/open-character-ai"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 rounded-full border border-divider px-4 py-1.5 text-xs font-bold text-secondary-text hover:text-primary-text hover:bg-bg-card transition-colors shadow-sm"
@@ -291,7 +282,7 @@ export default function Navbar() {
 
             {/* Vercel Deploy in Mobile menu */}
             <a
-              href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FSamurAIGPT%2Fcommon-saas-template"
+              href="https://vercel.com/new/clone?repository-url=https://github.com/Anil-matcha/open-character-ai"
               target="_blank"
               rel="noopener noreferrer"
               className="flex w-full items-center justify-center gap-2 rounded-full border border-divider py-3 text-xs font-bold text-secondary-text hover:text-primary-text hover:bg-bg-card transition-all"
