@@ -452,6 +452,9 @@ export async function GET() {
           userId ? { userId } : null
         ].filter(Boolean)
       },
+      include: {
+        _count: { select: { chats: true } },
+      },
       orderBy: { createdAt: "asc" },
     });
   } catch (error) {
@@ -468,6 +471,13 @@ export async function POST(req) {
   try {
     const session = await getServerSession(authOptions);
     const userId = session?.user?.id || null;
+
+    if (!userId) {
+      return NextResponse.json(
+        { error: "Unauthorized. Please sign in to create characters." },
+        { status: 401 },
+      );
+    }
 
     const body = await req.json();
     const { name, avatar, profile_url, description, personality, systemPrompt, greeting, is_public } = body;
