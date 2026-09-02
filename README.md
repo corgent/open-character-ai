@@ -186,6 +186,57 @@ character-ai/
 
 ---
 
+## ✅ CI/CD & Testing
+
+This repository ships with a full GitHub Actions pipeline under `.github/workflows/`.
+
+### Workflows
+
+| Workflow | Trigger | What it does |
+| :--- | :--- | :--- |
+| `ci.yml` | PR & push to `main` | Lint → Prisma validate/generate → unit tests → production build → smoke tests → Playwright e2e tests. The built `.next` artifact is shared between jobs. |
+| `release.yml` | Push to `main` (and manual dispatch) | Re-verifies CI, auto-increments the semver version from [Conventional Commits](https://www.conventionalcommits.org/), tags `vX.Y.Z`, generates a changelog, creates a GitHub Release, then boots the tagged build and re-runs smoke tests. |
+| `e2e.yml` | Nightly (02:00 UTC) + manual | Full Playwright e2e suite. Accepts an optional `base_url` input to test an external/staging deployment instead of a local build. |
+| `dependency-review.yml` | PR to `main` | Blocks PRs introducing high-severity vulnerable dependencies. |
+
+### Semver auto-increment
+
+`release.yml` infers the bump from commit messages since the last `v*` tag:
+
+- `BREAKING CHANGE` or `type!:` → **major**
+- `feat:` → **minor**
+- everything else (`fix:`, `chore:`, …) → **patch**
+
+You can override the bump manually via **Actions → Release → Run workflow** (`auto`/`patch`/`minor`/`major`). Pre-1.0 versions are published as *prereleases*. Release commits are skipped to avoid loops.
+
+### Test suites
+
+| Suite | Command | Location | Runs in CI |
+| :--- | :--- | :--- | :--- |
+| Unit (Vitest) | `npm run test` / `npm run test:unit` | `tests/*.test.js` | `ci.yml` |
+| Smoke (Node fetch) | `npm run test:smoke` | `tests/smoke/run.mjs` | `ci.yml`, `release.yml` |
+| E2E (Playwright) | `npm run test:e2e` | `tests/e2e/*.spec.js` | `ci.yml`, `e2e.yml` |
+
+Smoke and e2e tests boot the app with **dummy build-time env vars** — no real database or third-party secrets are required (unauthenticated API routes fall back to hardcoded defaults; auth-gated routes correctly return 401).
+
+### Branch protection (one-time, manual)
+
+In **Settings → Branches → main**, require these CI status checks before merging:
+
+- `Lint`
+- `Prisma validate & generate`
+- `Unit tests`
+- `Build`
+- `Smoke tests`
+
+`E2E tests (Playwright)` can be added once it has proven stable on `main`.
+
+### Dependabot
+
+`.github/dependabot.yml` opens weekly grouped PRs for npm (minor/patch grouped) and GitHub Actions updates.
+
+---
+
 ## 🔗 Related Projects
 
 - [Open-Pomelli](https://github.com/SamurAIGPT/Open-Pomelli) — Open-source Pomelli alternative — self-hosted AI assistant platform.
