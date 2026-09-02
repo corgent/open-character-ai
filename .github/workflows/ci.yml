@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Dummy build-time environment. Nothing external is contacted during
+# build/test (Prisma client is generated, services are mocked), so these
+# values only need to be well-formed, not real.
+env:
+  DATABASE_URL: "******localhost:5432/ci"
+  DIRECT_URL: "******localhost:5432/ci"
+  NEXTAUTH_SECRET: "ci_dummy_nextauth_secret"
+  NEXTAUTH_URL: "http://localhost:3000"
+  GOOGLE_CLIENT_ID: "ci_dummy_google_client_id"
+  GOOGLE_CLIENT_SECRET: "ci_dummy_google_client_secret"
+  STRIPE_SECRET_KEY: "sk_test_ci_dummy"
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: "pk_test_ci_dummy"
+  STRIPE_WEBHOOK_SECRET: "whsec_ci_dummy"
+  MU_API_KEY: "ci_dummy_muapi_key"
+  WEBHOOK_URL: "http://localhost:3000"
+  NEXT_PUBLIC_THEME: "midnight"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  prisma-validate:
+    name: Prisma validate & generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npx prisma generate
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Upload Next.js build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-build
+          path: |
+            .next/**
+            !.next/cache/**
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke-tests:
+    name: Smoke tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Download Next.js build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: next-build
+          path: .next
+      - name: Start production server
+        run: |
+          npx next start -p 3000 &
+          npx wait-on http://localhost:3000 --timeout 60000
+      - name: Run smoke tests
+        run: npm run test:smoke
+
+  e2e-tests:
+    name: E2E tests (Playwright)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Download Next.js build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: next-build
+          path: .next
+      - name: Run Playwright e2e tests
+        run: npm run test:e2e
+        env:
+          CI: true
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
