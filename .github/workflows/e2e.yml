@@ -16,6 +16,9 @@ concurrency:
   group: e2e-nightly
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   DATABASE_URL: "******localhost:5432/ci"
   DIRECT_URL: "******localhost:5432/ci"

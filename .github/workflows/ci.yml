@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 # Dummy build-time environment. Nothing external is contacted during
 # build/test (Prisma client is generated, services are mocked), so these
 # values only need to be well-formed, not real.
