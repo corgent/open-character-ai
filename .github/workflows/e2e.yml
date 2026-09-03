@@ -1,0 +1,68 @@
+name: E2E (nightly)
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "External base URL to test (leave empty to build & test locally)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: e2e-nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: "******localhost:5432/ci"
+  DIRECT_URL: "******localhost:5432/ci"
+  NEXTAUTH_SECRET: "ci_dummy_nextauth_secret"
+  NEXTAUTH_URL: "http://localhost:3000"
+  GOOGLE_CLIENT_ID: "ci_dummy_google_client_id"
+  GOOGLE_CLIENT_SECRET: "ci_dummy_google_client_secret"
+  STRIPE_SECRET_KEY: "sk_test_ci_dummy"
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: "pk_test_ci_dummy"
+  STRIPE_WEBHOOK_SECRET: "whsec_ci_dummy"
+  MU_API_KEY: "ci_dummy_muapi_key"
+  WEBHOOK_URL: "http://localhost:3000"
+  NEXT_PUBLIC_THEME: "midnight"
+
+jobs:
+  e2e:
+    name: Playwright e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Build app (local runs only)
+        if: ${{ inputs.base_url == '' }}
+        run: npm run build
+
+      - name: Run Playwright e2e tests
+        run: npm run test:e2e
+        env:
+          CI: true
+          E2E_BASE_URL: ${{ inputs.base_url || '' }}
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-nightly
+          path: playwright-report/
+          retention-days: 14
+          if-no-files-found: ignore
